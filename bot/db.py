@@ -62,9 +62,9 @@ class ExpenseRepository:
                 SELECT id, chat_id, user_id, user_name, amount, category, description, created_at
                 FROM expenses
                 WHERE chat_id = ?
-                  AND created_at >= ?
-                  AND created_at < ?
-                ORDER BY created_at DESC
+                  AND julianday(created_at) >= julianday(?)
+                  AND julianday(created_at) < julianday(?)
+                ORDER BY julianday(created_at) DESC, id DESC
                 """,
                 (chat_id, start_iso, end_iso),
             )
