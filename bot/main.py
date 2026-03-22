@@ -7,9 +7,9 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
-from bot.categorizer import list_categories, parse_expense
+from bot.categorizer import list_categories, parse_expenses
 from bot.config import load_settings
 from bot.db import ExpenseRepository
 from bot.reports import build_report, month_period, today_period, week_period
@@ -20,6 +20,9 @@ logging.basicConfig(level=logging.INFO)
 settings = load_settings()
 repo = ExpenseRepository()
 dp = Dispatcher()
+
+DAILY_REPORT_BUTTON = "Отчет за день"
+WEEKLY_REPORT_BUTTON = "Отчет за неделю"
 
 
 def is_allowed_chat(message: Message) -> bool:
@@ -43,6 +46,26 @@ async def reject_if_not_allowed(message: Message) -> bool:
     return True
 
 
+def reports_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=DAILY_REPORT_BUTTON), KeyboardButton(text=WEEKLY_REPORT_BUTTON)],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Введите трату или нажмите кнопку отчета",
+    )
+
+
+async def send_today_report(message: Message) -> None:
+    text = await build_report(repo, chat_id=message.chat.id, period=today_period(settings.timezone))
+    await message.answer(text, reply_markup=reports_keyboard())
+
+
+async def send_week_report(message: Message) -> None:
+    text = await build_report(repo, chat_id=message.chat.id, period=week_period(settings.timezone))
+    await message.answer(text, reply_markup=reports_keyboard())
+
+
 @dp.message(Command("chatid"))
 async def cmd_chat_id(message: Message) -> None:
     await message.answer(
@@ -60,8 +83,10 @@ async def cmd_start(message: Message) -> None:
     await message.answer(
         "Я помогу вести семейные расходы.\n\n"
         "Просто отправьте сообщение вроде `1250 продукты` или `Потратили 890 на такси`.\n"
-        "Команды: /today, /week, /month, /categories, /chatid, /help",
+        "Команды: /today, /week, /month, /categories, /chatid, /help\n"
+        "Или используйте кнопки для быстрых отчетов.",
         parse_mode="Markdown",
+        reply_markup=reports_keyboard(),
     )
 
 
@@ -72,12 +97,14 @@ async def cmd_help(message: Message) -> None:
     await message.answer(
         "Как пользоваться:\n"
         "- отправьте сумму и текст траты;\n"
+        "- можно отправлять несколько трат в одном сообщении;\n"
         "- бот сам попробует определить категорию;\n"
         "- для анализа используйте /today, /week, /month.\n\n"
         "Примеры:\n"
         "`450 кофе`\n"
         "`2300 продукты`\n"
-        "`Потратили 780 на аптеку`",
+        "`Потратили 780 на аптеку`\n"
+        "`178 перекус 65 вода 335 обед`",
         parse_mode="Markdown",
     )
 
@@ -94,16 +121,14 @@ async def cmd_categories(message: Message) -> None:
 async def cmd_today(message: Message) -> None:
     if await reject_if_not_allowed(message):
         return
-    text = await build_report(repo, chat_id=message.chat.id, period=today_period(settings.timezone))
-    await message.answer(text)
+    await send_today_report(message)
 
 
 @dp.message(Command("week"))
 async def cmd_week(message: Message) -> None:
     if await reject_if_not_allowed(message):
         return
-    text = await build_report(repo, chat_id=message.chat.id, period=week_period(settings.timezone))
-    await message.answer(text)
+    await send_week_report(message)
 
 
 @dp.message(Command("month"))
@@ -111,7 +136,21 @@ async def cmd_month(message: Message) -> None:
     if await reject_if_not_allowed(message):
         return
     text = await build_report(repo, chat_id=message.chat.id, period=month_period(settings.timezone))
-    await message.answer(text)
+    await message.answer(text, reply_markup=reports_keyboard())
+
+
+@dp.message(F.text == DAILY_REPORT_BUTTON)
+async def button_today_report(message: Message) -> None:
+    if await reject_if_not_allowed(message):
+        return
+    await send_today_report(message)
+
+
+@dp.message(F.text == WEEKLY_REPORT_BUTTON)
+async def button_week_report(message: Message) -> None:
+    if await reject_if_not_allowed(message):
+        return
+    await send_week_report(message)
 
 
 @dp.message(F.text)
@@ -119,27 +158,45 @@ async def handle_text_expense(message: Message) -> None:
     if await reject_if_not_allowed(message):
         return
 
-    parsed = parse_expense(message.text or "")
-    if not parsed:
+    parsed_result = parse_expenses(message.text or "")
+    if parsed_result.error:
         await message.answer(
-            "Не смог распознать трату. Попробуйте формат вроде `1200 продукты`.",
+            parsed_result.error,
             parse_mode="Markdown",
+            reply_markup=reports_keyboard(),
         )
         return
 
     now = datetime.now(ZoneInfo(settings.timezone)).isoformat(timespec="seconds")
-    await repo.add_expense(
-        chat_id=message.chat.id,
-        user_id=message.from_user.id if message.from_user else None,
-        user_name=user_display_name(message),
-        amount=parsed.amount,
-        category=parsed.category,
-        description=parsed.description,
-        created_at=now,
+    for parsed in parsed_result.expenses:
+        await repo.add_expense(
+            chat_id=message.chat.id,
+            user_id=message.from_user.id if message.from_user else None,
+            user_name=user_display_name(message),
+            amount=parsed.amount,
+            category=parsed.category,
+            description=parsed.description,
+            created_at=now,
+        )
+
+    if len(parsed_result.expenses) == 1:
+        parsed = parsed_result.expenses[0]
+        await message.answer(
+            "Сохранил расход: "
+            f"{parsed.amount:.2f}\n"
+            f"Категория: {parsed.category}\n"
+            f"Ключевые слова: {', '.join(parsed.matched_keywords)}\n"
+            f"Описание: {parsed.description}",
+            reply_markup=reports_keyboard(),
+        )
+        return
+
+    lines = [f"Сохранил {len(parsed_result.expenses)} трат:"]
+    lines.extend(
+        f"- {parsed.amount:.2f} | {parsed.category} | {parsed.description}"
+        for parsed in parsed_result.expenses
     )
-    await message.answer(
-        f"Сохранил расход: {parsed.amount:.2f}\nКатегория: {parsed.category}\nОписание: {parsed.description}"
-    )
+    await message.answer("\n".join(lines), reply_markup=reports_keyboard())
 
 
 async def main() -> None:
