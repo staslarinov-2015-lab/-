@@ -35,8 +35,25 @@ def user_display_name(message: Message) -> str:
     user = message.from_user
     if not user:
         return "Unknown"
+    candidates = [
+        user.first_name or "",
+        user.last_name or "",
+        " ".join(part for part in [user.first_name, user.last_name] if part),
+        user.username or "",
+    ]
+
+    normalized_candidates = [normalize_person_name(candidate) for candidate in candidates if candidate]
+    if any(alias in candidate for candidate in normalized_candidates for alias in settings.stas_aliases):
+        return "Стас"
+    if any(alias in candidate for candidate in normalized_candidates for alias in settings.kristina_aliases):
+        return "Кристина"
+
     full_name = " ".join(part for part in [user.first_name, user.last_name] if part)
     return full_name or user.username or str(user.id)
+
+
+def normalize_person_name(value: str) -> str:
+    return value.strip().lower().replace("ё", "е")
 
 
 async def reject_if_not_allowed(message: Message) -> bool:
