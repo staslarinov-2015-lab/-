@@ -9,7 +9,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
-from bot.categorizer import list_categories, parse_expenses
+from bot.categorizer import list_categories, parse_message
 from bot.config import load_settings
 from bot.db import ExpenseRepository
 from bot.reports import build_report, month_period, today_period, week_period
@@ -114,11 +114,14 @@ async def cmd_help(message: Message) -> None:
     await message.answer(
         "Как пользоваться:\n"
         "- отправьте сумму и текст траты;\n"
+        "- можно указать дату в начале сообщения;\n"
         "- можно отправлять несколько трат в одном сообщении;\n"
         "- бот сам попробует определить категорию;\n"
         "- для анализа используйте /today, /week, /month.\n\n"
         "Примеры:\n"
         "`450 кофе`\n"
+        "`21.03 2300 продукты`\n"
+        "`вчера 780 аптека`\n"
         "`2300 продукты`\n"
         "`Потратили 780 на аптеку`\n"
         "`178 перекус 65 вода 335 обед`",
@@ -175,17 +178,25 @@ async def handle_text_expense(message: Message) -> None:
     if await reject_if_not_allowed(message):
         return
 
-    parsed_result = parse_expenses(message.text or "")
-    if parsed_result.error:
+    parsed_message = parse_message(message.text or "", today=datetime.now(ZoneInfo(settings.timezone)).date())
+    if parsed_message.error:
         await message.answer(
-            parsed_result.error,
+            parsed_message.error,
             parse_mode="Markdown",
             reply_markup=reports_keyboard(),
         )
         return
 
-    now = datetime.now(ZoneInfo(settings.timezone)).isoformat(timespec="seconds")
-    for parsed in parsed_result.expenses:
+    now_dt = datetime.now(ZoneInfo(settings.timezone))
+    if parsed_message.expense_date is None:
+        created_at = now_dt.isoformat(timespec="seconds")
+    else:
+        created_at = datetime.combine(
+            parsed_message.expense_date,
+            now_dt.timetz().replace(microsecond=0),
+        ).isoformat()
+
+    for parsed in parsed_message.expenses:
         await repo.add_expense(
             chat_id=message.chat.id,
             user_id=message.from_user.id if message.from_user else None,
@@ -193,25 +204,32 @@ async def handle_text_expense(message: Message) -> None:
             amount=parsed.amount,
             category=parsed.category,
             description=parsed.description,
-            created_at=now,
+            created_at=created_at,
         )
 
-    if len(parsed_result.expenses) == 1:
-        parsed = parsed_result.expenses[0]
+    date_note = ""
+    if parsed_message.expense_date is not None:
+        date_note = f"\nДата: {parsed_message.expense_date.strftime('%d.%m.%Y')}"
+
+    if len(parsed_message.expenses) == 1:
+        parsed = parsed_message.expenses[0]
         await message.answer(
             "Сохранил расход: "
             f"{parsed.amount:.2f}\n"
             f"Категория: {parsed.category}\n"
             f"Ключевые слова: {', '.join(parsed.matched_keywords)}\n"
-            f"Описание: {parsed.description}",
+            f"Описание: {parsed.description}"
+            f"{date_note}",
             reply_markup=reports_keyboard(),
         )
         return
 
-    lines = [f"Сохранил {len(parsed_result.expenses)} трат:"]
+    lines = [f"Сохранил {len(parsed_message.expenses)} трат:"]
+    if parsed_message.expense_date is not None:
+        lines.append(f"Дата: {parsed_message.expense_date.strftime('%d.%m.%Y')}")
     lines.extend(
         f"- {parsed.amount:.2f} | {parsed.category} | {parsed.description}"
-        for parsed in parsed_result.expenses
+        for parsed in parsed_message.expenses
     )
     await message.answer("\n".join(lines), reply_markup=reports_keyboard())
 
