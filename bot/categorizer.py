@@ -382,7 +382,10 @@ def extract_expense_date(text: str, *, today: date | None = None) -> tuple[date 
         )
         return parsed_date, normalized[iso_match.end():].strip()
 
-    ru_match = re.match(r"^(?P<day>\d{1,2})\.(?P<month>\d{1,2})(?:\.(?P<year>\d{4}))?(?:\s+|$)", normalized)
+    ru_match = re.match(
+        r"^(?P<day>\d{1,2})[./-](?P<month>\d{1,2})(?:[./-](?P<year>\d{4}))?[.]?(?:\s+|$)",
+        normalized,
+    )
     if ru_match:
         parsed_year = int(ru_match.group("year")) if ru_match.group("year") else today.year
         parsed_date = date(
